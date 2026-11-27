@@ -1,0 +1,242 @@
+use crate::state::{AppState, Client};
+use gtk::{glib, prelude::*};
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+pub fn scrollable(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .margin_top(16)
+        .margin_bottom(24)
+        .hexpand(true)
+        .build();
+    container.append(child);
+
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::External)
+        .child(&container)
+        .hexpand(true)
+        .vexpand(true)
+        .build()
+}
+
+pub const APP_ICON_PNG: &[u8] =
+    include_bytes!("../data/icons/hicolor/256x256/apps/io.rovarch.app.png");
+
+pub const PLAY_LOGO_SVG: &[u8] = include_bytes!("../assets/branding/rovarch-play.svg");
+pub const PLAY_LOGO_PNG: &[u8] = include_bytes!("../assets/branding/rovarch-play.png");
+
+pub const STUDIO_LOGO_SVG: &[u8] = include_bytes!("../assets/branding/rovarch-studio.svg");
+pub const STUDIO_LOGO_PNG: &[u8] = include_bytes!("../assets/branding/rovarch-studio.png");
+pub const DRATIUX_LOGO_PNG: &[u8] = include_bytes!("../assets/branding/dratiux-logo.png");
+
+const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
+    ("Archivo.ttf", include_bytes!("../assets/fonts/Archivo.ttf")),
+    (
+        "JetBrainsMono.ttf",
+        include_bytes!("../assets/fonts/JetBrainsMono.ttf"),
+    ),
+];
+
+pub fn register_bundled_fonts() {
+    let font_map = pangocairo::FontMap::default();
+    let fonts_directory = gtk::glib::user_cache_dir().join("rovarch").join("fonts");
+    for (name, contents) in BUNDLED_FONTS {
+        let file = fonts_directory.join(name);
+        if let Err(error) = register_font(&font_map, &file, contents) {
+            eprintln!("Failed to load the {name} font: {error}");
+        }
+    }
+}
+
+fn register_font(
+    font_map: &pango::FontMap,
+    file: &std::path::Path,
+    contents: &[u8],
+) -> anyhow::Result<()> {
+    if std::fs::read(file).ok().as_deref() != Some(contents) {
+        create_parent_directory(file)?;
+        std::fs::write(file, contents)?;
+    }
+    font_map.add_font_file(file)?;
+    Ok(())
+}
+
+pub fn show_only_while_roblox_is_selected(target: &impl IsA<gtk::glib::Object>, state: &AppState) {
+    state
+        .bind_property("selected-client", target, "visible")
+        .transform_to(|_, client: Client| Some(client == Client::Player))
+        .sync_create()
+        .build();
+}
+
+pub fn scroll_into_view_once_shown(widget: &impl IsA<gtk::Widget>) {
+    widget.add_tick_callback(|widget, _| {
+        let is_laid_out = widget.width() > 0;
+        if !is_laid_out {
+            return gtk::glib::ControlFlow::Continue;
+        }
+
+        let viewport = widget
+            .ancestor(gtk::Viewport::static_type())
+            .and_downcast::<gtk::Viewport>();
+        if let Some(viewport) = viewport {
+            viewport.scroll_to(widget, None);
+        }
+        gtk::glib::ControlFlow::Break
+    });
+}
+
+pub fn unfocus_on_outside_click(container: &impl IsA<gtk::Widget>) {
+    let gesture = gtk::GestureClick::new();
+    // Capture phase, so this runs before the clicked child handles the event.
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    gesture.connect_pressed(|gesture, _, x, y| {
+        let Some(container) = gesture.widget() else {
+            return;
+        };
+        let Some(root) = container.root() else { return };
+        let Some(focus) = root.focus() else { return };
+
+        // In an Entry, the focus sits on its inner gtk::Text child.
+        if !focus.is::<gtk::Text>() {
+            return;
+        }
+        let field = focus.parent().unwrap_or(focus);
+
+        let clicked = container.pick(x, y, gtk::PickFlags::DEFAULT);
+        let inside = clicked.is_some_and(|w| w == field || w.is_ancestor(&field));
+        if !inside {
+            root.set_focus(None::<&gtk::Widget>);
+        }
+    });
+
+    container.add_controller(gesture);
+}
+
+pub fn find_in_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(program))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+pub fn is_executable_file(path: &std::path::Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+pub fn path_for_display(path: &std::path::Path) -> String {
+    match path.strip_prefix(gtk::glib::home_dir()) {
+        Ok(path_inside_home) => format!("~/{}", path_inside_home.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+pub fn files_under(path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_owned()]);
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        files.extend(files_under(&entry?.path())?);
+    }
+    files.sort();
+    Ok(files)
+}
+
+pub fn create_parent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(parent) => std::fs::create_dir_all(parent),
+        None => Ok(()),
+    }
+}
+
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(text.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0;
+    for byte in text.trim_end_matches('=').bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        buffer = buffer << 6 | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            decoded.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    Some(decoded)
+}
+
+pub fn floating_window(
+    parent: &impl IsA<gtk::Widget>,
+    title: &str,
+    default_width: i32,
+    default_height: i32,
+    resizable: bool,
+    content: &impl IsA<gtk::Widget>,
+) -> gtk::Window {
+    let header = adw::HeaderBar::builder()
+        .show_start_title_buttons(false)
+        .show_end_title_buttons(false)
+        .build();
+
+    let toolbar_view = adw::ToolbarView::new();
+    toolbar_view.add_top_bar(&header);
+    toolbar_view.set_content(Some(content));
+
+    let mut builder = gtk::Window::builder()
+        .title(title)
+        .modal(true)
+        .resizable(resizable)
+        .default_width(default_width)
+        .default_height(default_height)
+        .css_classes(["floating"])
+        .child(&toolbar_view);
+
+    if let Some(transient) = parent.root().and_downcast::<gtk::Window>() {
+        builder = builder.transient_for(&transient);
+    }
+
+    let window = builder.build();
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(gtk::glib::clone!(
+        #[weak]
+        window,
+        #[upgrade_or]
+        gtk::glib::Propagation::Proceed,
+        move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                window.close();
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        }
+    ));
+    window.add_controller(keys);
+
+    window
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_base64;
+
+    #[test]
+    fn decodes_with_and_without_padding() {
+        assert_eq!(decode_base64("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(decode_base64("aGVsbG8").unwrap(), b"hello");
+        assert_eq!(decode_base64("eyJBIjoxfQ").unwrap(), br#"{"A":1}"#);
+        assert!(decode_base64("a*b").is_none());
+    }
+}

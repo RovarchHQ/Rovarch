@@ -1,0 +1,154 @@
+use super::bound_rows::{choice_row, switch_row};
+use super::mangohud::mangohud_row;
+use crate::i18n::tr;
+use crate::state::{
+    AppState, CommandKey, PresentationMode, Renderer, SwapInterval, TitleBar,
+    USE_MONITOR_REFRESH_RATE,
+};
+use adw::prelude::*;
+
+pub fn graphics_group(state: &AppState) -> adw::PreferencesGroup {
+    let renderer_row = choice_row::<Renderer>(state, "renderer", "Renderer");
+
+    state
+        .bind_property("vr", &renderer_row, "sensitive")
+        .invert_boolean()
+        .sync_create()
+        .build();
+
+    state
+        .bind_property("vr", &renderer_row, "subtitle")
+        .transform_to(|_, vr: bool| Some(renderer_subtitle(vr)))
+        .sync_create()
+        .build();
+
+    let presentation_mode_row =
+        choice_row::<PresentationMode>(state, "presentation-mode", "Vulkan presentation mode");
+    presentation_mode_row.set_subtitle(&tr(
+        "How frames are shown on screen. Immediate turns V-Sync off.",
+    ));
+
+    let swap_interval_row =
+        choice_row::<SwapInterval>(state, "opengl-swap-interval", "OpenGL swap interval");
+    swap_interval_row.set_subtitle(&tr(
+        "Used instead of the presentation mode with the OpenGL renderer.",
+    ));
+
+    state
+        .bind_property("renderer", &presentation_mode_row, "sensitive")
+        .transform_to(|_, renderer: Renderer| Some(renderer == Renderer::Metal))
+        .sync_create()
+        .build();
+
+    state
+        .bind_property("renderer", &swap_interval_row, "sensitive")
+        .transform_to(|_, renderer: Renderer| Some(renderer == Renderer::OpenGl))
+        .sync_create()
+        .build();
+
+    let group = adw::PreferencesGroup::builder()
+        .title(tr("Graphics"))
+        .description(tr("Rosemary options for how Roblox draws to the screen."))
+        .build();
+    group.add(&renderer_row);
+    group.add(&presentation_mode_row);
+    group.add(&swap_interval_row);
+    group.add(&refresh_rate_row(state));
+    group.add(&mangohud_row(state));
+
+    group
+}
+
+fn renderer_subtitle(vr: bool) -> String {
+    if vr {
+        tr("VR needs OpenGL. Turn off Play in VR to change this.")
+    } else {
+        tr("The graphics API used for Rosemary. Use OpenGL if you have older hardware.")
+    }
+}
+
+pub fn input_group(state: &AppState) -> adw::PreferencesGroup {
+    let title_bar_row = choice_row::<TitleBar>(state, "title-bar", "Title bar");
+    title_bar_row.set_subtitle(&tr("Mac-style shows Roblox's menus inside the title bar."));
+
+    let menu_bar_row = switch_row(state, "show-menu-bar", "Show Roblox's menus");
+    menu_bar_row.set_subtitle(&tr(
+        "The Roblox, Edit and Window menus. Their shortcuts keep working when hidden.",
+    ));
+
+    let command_key_row = choice_row::<CommandKey>(state, "command-key", "Command key");
+    command_key_row.set_subtitle(&tr("The key Roblox sees as ⌘ Command."));
+
+    let ctrl_for_edit_shortcuts_row = switch_row(
+        state,
+        "ctrl-for-edit-shortcuts",
+        "Ctrl for editing shortcuts",
+    );
+    ctrl_for_edit_shortcuts_row.set_subtitle(&tr(
+        "Ctrl+A, C, V, X, Y and Z act as their ⌘ Command versions.",
+    ));
+
+    let plain_ctrl_click_row = switch_row(state, "plain-ctrl-click", "Plain Ctrl+click");
+    plain_ctrl_click_row.set_subtitle(&tr(
+        "Treat Ctrl+left click as a left click instead of a right click.",
+    ));
+
+    state
+        .bind_property("command-key", &ctrl_for_edit_shortcuts_row, "sensitive")
+        .transform_to(|_, command_key: CommandKey| Some(command_key != CommandKey::Ctrl))
+        .sync_create()
+        .build();
+
+    let group = adw::PreferencesGroup::builder()
+        .title(tr("Input &amp; windows"))
+        .description(tr("Rosemary options for the keyboard, mouse and window."))
+        .build();
+    group.add(&title_bar_row);
+    group.add(&menu_bar_row);
+    group.add(&command_key_row);
+    group.add(&ctrl_for_edit_shortcuts_row);
+    group.add(&plain_ctrl_click_row);
+    group
+}
+
+pub fn refresh_rate_row(state: &AppState) -> adw::ActionRow {
+    let refresh_rate_input = gtk::Entry::builder()
+        .placeholder_text(tr("The monitor's"))
+        .valign(gtk::Align::Center)
+        .build();
+
+    let row = adw::ActionRow::builder()
+        .title(tr("Refresh rate (Hz)"))
+        .subtitle(tr(
+            "The refresh rate Roblox is told the display has. Default's to the monitor's refresh rate.",
+        ))
+        .build();
+    row.add_suffix(&refresh_rate_input);
+
+    state
+        .bind_property("refresh-rate", &refresh_rate_input, "text")
+        .transform_to(|_, rate: u32| Some(refresh_rate_as_text(rate)))
+        .transform_from(|_, text: String| refresh_rate_from_text(&text))
+        .bidirectional()
+        .sync_create()
+        .build();
+
+    row
+}
+
+fn refresh_rate_as_text(rate: u32) -> String {
+    if rate == USE_MONITOR_REFRESH_RATE {
+        String::new()
+    } else {
+        rate.to_string()
+    }
+}
+
+fn refresh_rate_from_text(text: &str) -> Option<u32> {
+    let text = text.trim();
+    if text.is_empty() {
+        Some(USE_MONITOR_REFRESH_RATE)
+    } else {
+        text.parse().ok()
+    }
+}
