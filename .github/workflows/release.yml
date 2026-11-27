@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  version:
+    name: Read version
+    if: startsWith(github.event.head_commit.message, 'release:')
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          tag="v$version"
+          if git rev-parse --quiet --verify "refs/tags/$tag" > /dev/null; then
+            echo "::error::Tag $tag already exists, bump the version in Cargo.toml"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  appimage:
+    name: AppImage
+    needs: version
+    uses: ./.github/workflows/appimage.yml
+    with:
+      release: true
+
+  release:
+    name: Create release
+    needs: [version, appimage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Write release notes from commit logs
+        run: |
+          if previous_tag="$(git describe --tags --abbrev=0 HEAD^ 2> /dev/null)"; then
+            range="$previous_tag..HEAD"
+          else
+            range="HEAD"
+          fi
+          git log --no-merges --pretty='- %s (%h)%n%b' "$range" > release-notes.md
+          cat release-notes.md
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Name release files after the version
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mkdir release-files
+          cp "$(find artifacts -type f -name '*.AppImage' | head -n1)" "release-files/Rovarch-$TAG-x86_64.AppImage"
+          (cd release-files && sha256sum Rovarch-* > SHA256SUMS)
+          ls -la release-files
+          cat release-files/SHA256SUMS
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          gh release create "$TAG" release-files/* \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            --prerelease="$PRERELEASE"

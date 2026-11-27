@@ -1,0 +1,50 @@
+name: AppImage
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+concurrency:
+  group: appimage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    name: Build AppImage
+    if: ${{ inputs.release || !startsWith(github.event.head_commit.message, 'release:') }}
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:forky
+    env:
+      HOME: /root
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates clang curl file git lld pkg-config \
+            adwaita-icon-theme gtk-update-icon-cache libadwaita-1-dev libgtk-4-dev \
+            librsvg2-common \
+            ibus-gtk4 fcitx5-frontend-gtk4
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build AppImage
+        run: ./build/appimage/build.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Rovarch-x86_64.AppImage
+          path: build/appimage/Rovarch-x86_64.AppImage
+          if-no-files-found: error
